@@ -30,6 +30,10 @@ extras_require = {
     "eth": [
         "cached-property>=1.5.1",
         "eth-bloom>=1.0.3",
+        # Post-quantum cryptography
+        "liboqs-python>=0.9.0",
+        "blake3>=0.4.0",
+        # Keep for backward compatibility
         "eth-keys>=0.4.0",
         "eth-typing>=5.2.0",
         "eth-utils>=2.0.0",
@@ -72,15 +76,15 @@ with open("README.md") as readme_file:
     long_description = readme_file.read()
 
 setup(
-    name="py-evm",
+    name="qrdx-evm",
     # *IMPORTANT*: Don't manually change the version here. See Contributing docs for the release process.
-    version="0.12.1-beta.1",
-    description="Python implementation of the Ethereum Virtual Machine",
+    version="1.0.0-alpha.1",
+    description="QEVM - Quantum-Resistant Ethereum Virtual Machine for QRDX Chain",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    author="Ethereum Foundation",
-    author_email="snakecharmers@ethereum.org",
-    url="https://github.com/ethereum/py-evm",
+    author="QRDX Foundation",
+    author_email="research@mail.qrdx.org",
+    url="https://github.com/qrdx-org/qrdx-chain",
     include_package_data=True,
     py_modules=["eth"],
     install_requires=install_requires,
