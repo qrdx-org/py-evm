@@ -7,3 +7,4 @@ from .clique.clique import (
 from .context import ConsensusContext
 from .noproof import NoProofConsensus
 from .pow import PowConsensus
+from .qrpos_applier import QRPoSApplier, QRPoSConsensusValidation
