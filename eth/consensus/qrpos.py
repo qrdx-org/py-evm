@@ -522,3 +522,70 @@ def verify_attestation(
         attestation.signature,
         validator_public_key,
     )
+
+
+class QRPoSConsensus:
+    """
+    Main QR-PoS consensus engine.
+    
+    Manages validators, attestations, and finality for the QRDX chain.
+    """
+    
+    def __init__(
+        self,
+        validator_set: Optional[ValidatorSet] = None,
+        genesis_time: int = 0,
+    ):
+        """
+        Initialize consensus engine.
+        
+        Args:
+            validator_set: Set of validators (created if None)
+            genesis_time: Unix timestamp of genesis block
+        """
+        self.validator_set = validator_set or ValidatorSet()
+        self.attestation_pool = AttestationPool()
+        self.finality_gadget = FinalityGadget()
+        self.genesis_time = genesis_time or int(time.time())
+        
+    def get_current_slot(self) -> int:
+        """Get current slot number."""
+        return compute_current_slot(self.genesis_time)
+    
+    def get_proposer_for_slot(self, slot: int) -> int:
+        """Get validator index that should propose for this slot."""
+        epoch = compute_epoch_at_slot(slot)
+        active_validators = self.validator_set.get_active_validators(epoch)
+        
+        if not active_validators:
+            raise ValueError("No active validators")
+        
+        # Simple round-robin for now (can be made weighted later)
+        return slot % len(active_validators)
+    
+    def add_attestation(self, attestation: Attestation) -> None:
+        """Add an attestation to the pool."""
+        self.attestation_pool.add_attestation(attestation, self.validator_set)
+    
+    def get_attestations_for_block(
+        self,
+        slot: int,
+        block_hash: Hash32,
+    ) -> List[Attestation]:
+        """Get attestations to include in a block."""
+        return self.attestation_pool.get_attestations_for_slot(slot, block_hash)
+    
+    def process_block_finality(
+        self,
+        slot: int,
+        block_hash: Hash32,
+        attestations: List[Attestation],
+    ) -> Tuple[bool, bool]:
+        """Process attestations and update finality."""
+        return self.finality_gadget.process_attestations(
+            slot,
+            block_hash,
+            attestations,
+            self.validator_set,
+        )
+
