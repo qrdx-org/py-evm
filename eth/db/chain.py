@@ -536,6 +536,44 @@ class ChainDB(HeaderDB, ChainDatabaseAPI):
         )
 
     #
+    # QR-PoS Signature API
+    #
+    def persist_qrpos_signature(
+        self,
+        block_hash: Hash32,
+        signature: bytes,
+    ) -> None:
+        """
+        Store a QR-PoS Dilithium signature for a block.
+        
+        :param block_hash: The hash of the block this signature is for
+        :param signature: The raw Dilithium signature bytes (typically 3,309 bytes)
+        """
+        key = SchemaV1.make_qrpos_signature_lookup_key(block_hash)
+        self.db[key] = signature
+
+    def get_qrpos_signature(self, block_hash: Hash32) -> bytes:
+        """
+        Retrieve the QR-PoS Dilithium signature for a block.
+        
+        :param block_hash: The hash of the block to retrieve the signature for
+        :return: The raw Dilithium signature bytes
+        :raises KeyError: If no signature exists for the given block hash
+        """
+        key = SchemaV1.make_qrpos_signature_lookup_key(block_hash)
+        return self.db[key]
+
+    def qrpos_signature_exists(self, block_hash: Hash32) -> bool:
+        """
+        Check if a QR-PoS signature exists for the given block hash.
+        
+        :param block_hash: The hash of the block to check
+        :return: True if a signature exists, False otherwise
+        """
+        key = SchemaV1.make_qrpos_signature_lookup_key(block_hash)
+        return key in self.db
+
+    #
     # Raw Database API
     #
     def exists(self, key: bytes) -> bool:

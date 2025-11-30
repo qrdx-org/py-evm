@@ -44,3 +44,10 @@ class SchemaV1(SchemaAPI):
     @staticmethod
     def make_withdrawal_hash_to_block_lookup_key(withdrawal_hash: Hash32) -> bytes:
         return f"withdrawal-hash-to-block:{withdrawal_hash!r}".encode()
+
+    @staticmethod
+    def make_qrpos_signature_lookup_key(block_hash: Hash32) -> bytes:
+        """
+        Key for storing QR-PoS Dilithium signatures indexed by block hash.
+        """
+        return f"qrpos-signature:{block_hash!r}".encode()
