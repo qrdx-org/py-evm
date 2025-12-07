@@ -61,7 +61,8 @@ def validate_qrpos_block(
     validator_index = qrpos_data['validator_index']
     
     # Validate proposer is correct for this slot
-    expected_proposer = slot % VALIDATOR_COUNT
+    # Use actual number of validators, not hardcoded VALIDATOR_COUNT
+    expected_proposer = slot % len(validator_pubkeys)
     if validator_index != expected_proposer:
         raise ValidationError(
             f"Wrong proposer for slot {slot}: "
@@ -77,8 +78,19 @@ def validate_qrpos_block(
     
     # Get validator's public key
     validator_pubkey_bytes = validator_pubkeys[validator_index]
+    
+    # Debug: Log public key info
+    import logging
+    logger = logging.getLogger('eth.consensus.qrpos_validator')
+    logger.debug(
+        f"Validating block #{header.block_number} from validator {validator_index}: "
+        f"pubkey_len={len(validator_pubkey_bytes)}, "
+        f"pubkey_hex={validator_pubkey_bytes.hex()[:64]}..., "
+        f"sig_len={len(signature)}"
+    )
+    
     try:
-        public_key = DilithiumPublicKey.from_bytes(validator_pubkey_bytes)
+        public_key = DilithiumPublicKey(validator_pubkey_bytes)
     except Exception as e:
         raise ValidationError(f"Invalid validator public key: {e}")
     
