@@ -14,6 +14,7 @@ Based on principles from Ethereum 2.0 PoS but adapted for quantum resistance.
 from typing import List, Dict, Optional, Tuple, Set
 from dataclasses import dataclass
 from enum import Enum
+from collections import OrderedDict
 import time
 
 from eth_typing import Address, Hash32
@@ -66,8 +67,8 @@ class Validator:
             raise ValueError(f"Public key must be 1,952 bytes, got {len(self.public_key)}")
         if self.stake < MIN_STAKE:
             raise ValueError(f"Stake must be >= {MIN_STAKE}, got {self.stake}")
-        if self.index < 0 or self.index >= VALIDATOR_COUNT:
-            raise ValueError(f"Validator index must be 0-149, got {self.index}")
+        if self.index < 0:
+            raise ValueError(f"Validator index must be >= 0, got {self.index}")
     
     def is_active_at_epoch(self, epoch: int) -> bool:
         """Check if validator is active at given epoch."""
@@ -96,8 +97,8 @@ class Attestation:
         """Validate attestation fields."""
         if len(self.signature) != 3309:
             raise ValueError(f"Signature must be 3,309 bytes, got {len(self.signature)}")
-        if self.validator_index < 0 or self.validator_index >= VALIDATOR_COUNT:
-            raise ValueError(f"Validator index must be 0-149, got {self.validator_index}")
+        if self.validator_index < 0:
+            raise ValueError(f"Validator index must be >= 0, got {self.validator_index}")
     
     def get_signing_message(self) -> bytes:
         """Get the message that was signed."""
@@ -125,16 +126,16 @@ class ValidatorSet:
         Initialize validator set.
         
         Args:
-            genesis_validators: Initial validators (must be exactly 150)
+            genesis_validators: Initial validators (can be 1-150 for testnet)
         """
         self.validators: List[Validator] = []
         self.validator_by_address: Dict[Address, Validator] = {}
         self.validator_by_pubkey: Dict[bytes, Validator] = {}
         
         if genesis_validators:
-            if len(genesis_validators) != VALIDATOR_COUNT:
+            if len(genesis_validators) < 1 or len(genesis_validators) > VALIDATOR_COUNT:
                 raise ValueError(
-                    f"Genesis must have exactly {VALIDATOR_COUNT} validators, "
+                    f"Genesis validators must be 1-{VALIDATOR_COUNT}, "
                     f"got {len(genesis_validators)}"
                 )
             for validator in genesis_validators:
@@ -343,6 +344,48 @@ class AttestationPool:
         slots_to_remove = [slot for slot in self.attestations if slot < cutoff_slot]
         for slot in slots_to_remove:
             del self.attestations[slot]
+    
+    def get_attestations_for_inclusion(
+        self,
+        current_slot: int,
+        max_attestations: int = 128,
+    ) -> List[Attestation]:
+        """
+        Get attestations to include in a new block.
+        
+        Selects attestations from recent slots, prioritizing:
+        1. Most recent slots first
+        2. Deduplication by validator
+        
+        Args:
+            current_slot: Current slot number
+            max_attestations: Maximum number of attestations to include
+        
+        Returns:
+            List of attestations for block inclusion
+        """
+        included = []
+        seen_validators = set()
+        
+        # Look back at recent slots (up to 32 slots back)
+        for slot in range(current_slot - 1, max(0, current_slot - 33), -1):
+            if slot not in self.attestations:
+                continue
+            
+            # Get all attestations for this slot (all block hashes)
+            for block_hash, slot_attestations in self.attestations[slot].items():
+                for attestation in slot_attestations:
+                    # Skip if we've already included this validator
+                    if attestation.validator_index in seen_validators:
+                        continue
+                    
+                    included.append(attestation)
+                    seen_validators.add(attestation.validator_index)
+                    
+                    if len(included) >= max_attestations:
+                        return included
+        
+        return included
 
 
 class FinalityGadget:
@@ -358,6 +401,10 @@ class FinalityGadget:
         self.justified_hash: Hash32 = Hash32(b'\x00' * 32)
         self.finalized_slot: int = 0
         self.finalized_hash: Hash32 = Hash32(b'\x00' * 32)
+        # LRU cache for block weights (limit to most recent 1000 blocks)
+        # Older blocks have weights persisted to database, so cache eviction is safe
+        self._block_weights: OrderedDict[Hash32, int] = OrderedDict()
+        self._max_cache_size: int = 1000
     
     def process_attestations(
         self,
@@ -415,6 +462,233 @@ class FinalityGadget:
                 is_finalized = True
         
         return is_justified, is_finalized
+    
+    def calculate_block_weight(
+        self,
+        block_hash: Hash32,
+        attestations: List[Attestation],
+        validator_set: ValidatorSet,
+        epoch: int,
+    ) -> int:
+        """
+        Calculate the weight of a block based on attestations.
+        
+        Weight is the sum of stakes of validators who attested to this block.
+        Used for fork choice - heavier chain wins.
+        
+        Args:
+            block_hash: Hash of block
+            attestations: Attestations for this block
+            validator_set: Validator set
+            epoch: Epoch to check validator activity
+        
+        Returns:
+            Total weight (stake) of attestations
+        """
+        # Check cache first (move to end for LRU)
+        if block_hash in self._block_weights:
+            # Move to end (most recently used)
+            self._block_weights.move_to_end(block_hash)
+            return self._block_weights[block_hash]
+        
+        total_weight = 0
+        attesting_validators = set()
+        
+        for attestation in attestations:
+            if attestation.validator_index in attesting_validators:
+                continue  # Don't count twice
+            
+            validator = validator_set.get_validator(attestation.validator_index)
+            if validator.is_active_at_epoch(epoch):
+                total_weight += validator.stake
+                attesting_validators.add(attestation.validator_index)
+        
+        # Cache the result with LRU eviction
+        self._block_weights[block_hash] = total_weight
+        # Evict oldest entry if cache is full
+        if len(self._block_weights) > self._max_cache_size:
+            self._block_weights.popitem(last=False)  # Remove oldest (FIFO/LRU)
+        
+        return total_weight
+    
+    def clear_weight_cache(self) -> None:
+        """Clear cached block weights."""
+        self._block_weights.clear()
+
+
+class ForkChoice:
+    """
+    Fork choice rule for QR-PoS consensus.
+    
+    Implements LMD-GHOST (Latest Message Driven Greedy Heaviest Observed SubTree)
+    with finality checkpoint boundary.
+    """
+    
+    def __init__(self, finality_gadget: FinalityGadget):
+        """
+        Initialize fork choice.
+        
+        Args:
+            finality_gadget: Finality gadget for checkpoint info
+        """
+        self.finality_gadget = finality_gadget
+    
+    def get_head(
+        self,
+        candidates: List[Tuple[Hash32, int, int]],  # (block_hash, slot, weight)
+        chaindb,  # ChainDB instance for checkpoint retrieval and ancestry checking
+    ) -> Optional[Hash32]:
+        """
+        Select canonical chain head from competing forks.
+        
+        Rules:
+        1. Must extend from or after finalized checkpoint (reorg boundary)
+        2. Choose chain with highest total weight (most attestations)
+        3. Break ties by choosing block with lower hash value
+        
+        Args:
+            candidates: List of (block_hash, slot, weight) tuples
+            chaindb: ChainDB instance to check finalized checkpoint
+        
+        Returns:
+            Hash of canonical head block, or None if no valid candidates
+        """
+        if not candidates:
+            return None
+        
+        # Get finalized checkpoint
+        finalized_slot, finalized_hash = chaindb.get_qrpos_finalized_checkpoint()
+        
+        # Filter candidates that extend from finalized checkpoint
+        valid_candidates = []
+        for block_hash, slot, weight in candidates:
+            # Must be at or after finalized slot
+            if slot < finalized_slot:
+                continue
+            
+            # Verify ancestry: block must extend from finalized checkpoint
+            if not self._extends_from_finalized(
+                block_hash,
+                finalized_hash,
+                finalized_slot,
+                chaindb
+            ):
+                continue
+            
+            valid_candidates.append((block_hash, slot, weight))
+        
+        if not valid_candidates:
+            # No valid candidates extend finalized checkpoint
+            return None
+        
+        # Sort by weight (descending), then by hash (ascending for tie-breaking)
+        valid_candidates.sort(key=lambda x: (-x[2], x[0]))
+        
+        # Return heaviest chain
+        return valid_candidates[0][0]
+    
+    def _extends_from_finalized(
+        self,
+        block_hash: Hash32,
+        finalized_hash: Hash32,
+        finalized_slot: int,
+        chaindb,
+    ) -> bool:
+        """
+        Check if a block extends from the finalized checkpoint.
+        
+        Walks backwards from block_hash until either:
+        - We find finalized_hash (valid)
+        - We reach a slot before finalized_slot (invalid)
+        - We reach genesis (valid if finalized is genesis)
+        
+        Args:
+            block_hash: Hash of block to check
+            finalized_hash: Hash of finalized checkpoint
+            finalized_slot: Slot of finalized checkpoint
+            chaindb: ChainDB instance for ancestry lookup
+        
+        Returns:
+            True if block extends from finalized checkpoint, False otherwise
+        """
+        # Special case: if finalized is genesis (slot 0, zero hash), all blocks are valid
+        if finalized_slot == 0 and finalized_hash == Hash32(b'\x00' * 32):
+            return True
+        
+        # Walk backwards from block to find finalized checkpoint
+        current_hash = block_hash
+        
+        # Limit depth to prevent infinite loops (shouldn't need more than ~1000 blocks)
+        max_depth = 10000
+        depth = 0
+        
+        while depth < max_depth:
+            # Found the finalized checkpoint - valid!
+            if current_hash == finalized_hash:
+                return True
+            
+            try:
+                # Get header for current block
+                header = chaindb.get_block_header_by_hash(current_hash)
+                
+                # Decode slot from extra_data if available
+                # Format: [slot(8 bytes)][validator_index(8 bytes)][pubkey_prefix(16 bytes)]
+                if len(header.extra_data) >= 8:
+                    block_slot = int.from_bytes(header.extra_data[:8], 'big')
+                    
+                    # If we've walked back past the finalized slot without finding it, invalid
+                    if block_slot < finalized_slot:
+                        return False
+                
+                # Reached genesis without finding finalized checkpoint
+                if header.block_number == 0:
+                    # Valid only if finalized is also genesis
+                    return finalized_slot == 0
+                
+                # Move to parent block
+                current_hash = header.parent_hash
+                depth += 1
+                
+            except KeyError:
+                # Block not found in database - invalid
+                return False
+        
+        # Reached max depth without resolution - conservative: reject
+        return False
+    
+    def compare_chains(
+        self,
+        chain_a: Tuple[Hash32, int, int],  # (hash, slot, weight)
+        chain_b: Tuple[Hash32, int, int],
+    ) -> int:
+        """
+        Compare two competing chains.
+        
+        Args:
+            chain_a: (block_hash, slot, weight) for chain A
+            chain_b: (block_hash, slot, weight) for chain B
+        
+        Returns:
+            1 if chain_a is preferred
+            -1 if chain_b is preferred
+            0 if equal (shouldn't happen with hash tie-breaking)
+        """
+        hash_a, slot_a, weight_a = chain_a
+        hash_b, slot_b, weight_b = chain_b
+        
+        # Higher weight wins
+        if weight_a > weight_b:
+            return 1
+        elif weight_a < weight_b:
+            return -1
+        
+        # Tie-break by hash (lower hash wins)
+        if hash_a < hash_b:
+            return 1
+        elif hash_a > hash_b:
+            return -1
+        
+        return 0
 
 
 # Utility functions
@@ -546,6 +820,7 @@ class QRPoSConsensus:
         self.validator_set = validator_set or ValidatorSet()
         self.attestation_pool = AttestationPool()
         self.finality_gadget = FinalityGadget()
+        self.fork_choice = ForkChoice(self.finality_gadget)
         self.genesis_time = genesis_time or int(time.time())
         
     def get_current_slot(self) -> int:
@@ -588,4 +863,45 @@ class QRPoSConsensus:
             attestations,
             self.validator_set,
         )
+    
+    def calculate_block_weight(
+        self,
+        block_hash: Hash32,
+        attestations: List[Attestation],
+        epoch: int,
+    ) -> int:
+        """
+        Calculate weight of a block for fork choice.
+        
+        Args:
+            block_hash: Hash of block
+            attestations: Attestations for the block
+            epoch: Epoch number
+        
+        Returns:
+            Total weight (stake) of attestations
+        """
+        return self.finality_gadget.calculate_block_weight(
+            block_hash,
+            attestations,
+            self.validator_set,
+            epoch,
+        )
+    
+    def select_canonical_head(
+        self,
+        candidates: List[Tuple[Hash32, int, int]],
+        chaindb,
+    ) -> Optional[Hash32]:
+        """
+        Select canonical chain head using fork choice rule.
+        
+        Args:
+            candidates: List of (block_hash, slot, weight) tuples
+            chaindb: ChainDB instance
+        
+        Returns:
+            Hash of canonical head, or None if no valid candidates
+        """
+        return self.fork_choice.get_head(candidates, chaindb)
 

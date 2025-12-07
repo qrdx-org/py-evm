@@ -177,9 +177,13 @@ class DilithiumPrivateKey:
         return "DilithiumPrivateKey(<secret>)"
 
 
-def generate_dilithium_keypair() -> Tuple[DilithiumPrivateKey, DilithiumPublicKey]:
+def generate_dilithium_keypair(seed: bytes = None) -> Tuple[DilithiumPrivateKey, DilithiumPublicKey]:
     """
     Generate a new Dilithium key pair for signing.
+    
+    Args:
+        seed: Optional 32-byte seed for deterministic key generation.
+              If None, generates random keypair.
     
     Returns:
         A tuple of (private_key, public_key)
@@ -190,14 +194,43 @@ def generate_dilithium_keypair() -> Tuple[DilithiumPrivateKey, DilithiumPublicKe
         >>> signature = private_key.sign(message)
         >>> assert public_key.verify(message, signature)
     """
-    with oqs.Signature(DILITHIUM_VARIANT) as signer:
-        public_key_bytes = signer.generate_keypair()
-        secret_key_bytes = signer.export_secret_key()
+    import os
+    
+    if seed is not None:
+        # Deterministic generation: temporarily replace random source
+        if len(seed) != 32:
+            raise ValueError("Seed must be exactly 32 bytes")
         
-        public_key = DilithiumPublicKey(public_key_bytes)
-        private_key = DilithiumPrivateKey(secret_key_bytes, public_key_bytes)
+        # Save original random state
+        original_random = os.urandom
         
-        return private_key, public_key
+        # Create deterministic random function from seed
+        import hashlib
+        counter = [0]
+        def deterministic_random(n: int) -> bytes:
+            result = b''
+            while len(result) < n:
+                data = seed + counter[0].to_bytes(4, 'big')
+                result += hashlib.sha256(data).digest()
+                counter[0] += 1
+            return result[:n]
+        
+        # Temporarily override os.urandom
+        os.urandom = deterministic_random
+    
+    try:
+        with oqs.Signature(DILITHIUM_VARIANT) as signer:
+            public_key_bytes = signer.generate_keypair()
+            secret_key_bytes = signer.export_secret_key()
+            
+            public_key = DilithiumPublicKey(public_key_bytes)
+            private_key = DilithiumPrivateKey(secret_key_bytes, public_key_bytes)
+            
+            return private_key, public_key
+    finally:
+        if seed is not None:
+            # Restore original random function
+            os.urandom = original_random
 
 
 def verify_dilithium_signature(

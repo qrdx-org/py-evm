@@ -61,6 +61,9 @@ from eth.validation import (
 from eth.vm.header import (
     HeaderSedes,
 )
+from rlp.sedes import (
+    big_endian_int,
+)
 
 
 class HeaderDB(HeaderDatabaseAPI):
@@ -425,6 +428,31 @@ class HeaderDB(HeaderDatabaseAPI):
                 db, curr_chain_head, genesis_parent_hash
             )
 
+        # QR-PoS Fork Choice: Use weight-based selection when weights are available
+        # Check if both blocks have stored weights (indicates QR-PoS blocks)
+        curr_weight_key = SchemaV1.make_qrpos_block_weight_key(curr_chain_head.hash)
+        prev_weight_key = SchemaV1.make_qrpos_block_weight_key(previous_canonical_head)
+        
+        if curr_weight_key in db and prev_weight_key in db:
+            # Both blocks have weights - use attestation-based fork choice
+            curr_weight = rlp.decode(db[curr_weight_key], sedes=big_endian_int)
+            prev_weight = rlp.decode(db[prev_weight_key], sedes=big_endian_int)
+            
+            # Heaviest chain wins
+            if curr_weight > prev_weight:
+                return cls._set_as_canonical_chain_head(
+                    db, curr_chain_head, genesis_parent_hash
+                )
+            elif curr_weight == prev_weight:
+                # Tie-breaker: Lower hash value wins (deterministic)
+                if curr_chain_head.hash < previous_canonical_head:
+                    return cls._set_as_canonical_chain_head(
+                        db, curr_chain_head, genesis_parent_hash
+                    )
+            # Current head has equal or less weight, keep previous canonical head
+            return (), ()
+        
+        # Fall back to score-based fork choice for non-QR-PoS blocks (PoW compatibility)
         if score > head_score:
             return cls._set_as_canonical_chain_head(
                 db, curr_chain_head, genesis_parent_hash

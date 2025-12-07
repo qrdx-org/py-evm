@@ -3,6 +3,7 @@ import itertools
 from typing import (
     Dict,
     Iterable,
+    List,
     Sequence,
     Tuple,
     Type,
@@ -571,6 +572,188 @@ class ChainDB(HeaderDB, ChainDatabaseAPI):
         :return: True if a signature exists, False otherwise
         """
         key = SchemaV1.make_qrpos_signature_lookup_key(block_hash)
+        return key in self.db
+    
+    def persist_qrpos_attestations(
+        self,
+        block_hash: Hash32,
+        attestations: List,
+    ) -> None:
+        """
+        Store QR-PoS attestations included in a block.
+        
+        :param block_hash: The hash of the block these attestations are in
+        :param attestations: List of Attestation objects
+        """
+        import rlp
+        from rlp.sedes import big_endian_int, binary, CountableList, List as RLPList
+        
+        # Serialize attestations to RLP
+        attestation_sedes = RLPList([
+            big_endian_int,  # slot
+            binary,          # block_hash
+            big_endian_int,  # validator_index
+            binary,          # signature
+        ])
+        
+        attestations_data = [
+            [att.slot, att.block_hash, att.validator_index, att.signature]
+            for att in attestations
+        ]
+        
+        encoded = rlp.encode(attestations_data, CountableList(attestation_sedes))
+        key = SchemaV1.make_qrpos_attestations_lookup_key(block_hash)
+        self.db[key] = encoded
+    
+    def get_qrpos_attestations(self, block_hash: Hash32) -> List:
+        """
+        Retrieve QR-PoS attestations for a block.
+        
+        :param block_hash: The hash of the block
+        :return: List of Attestation objects
+        :raises KeyError: If no attestations exist for the given block hash
+        """
+        import rlp
+        from rlp.sedes import big_endian_int, binary, CountableList, List as RLPList
+        from eth.consensus.qrpos import Attestation
+        
+        key = SchemaV1.make_qrpos_attestations_lookup_key(block_hash)
+        encoded = self.db[key]
+        
+        attestation_sedes = RLPList([
+            big_endian_int,  # slot
+            binary,          # block_hash
+            big_endian_int,  # validator_index
+            binary,          # signature
+        ])
+        
+        attestations_data = rlp.decode(encoded, CountableList(attestation_sedes))
+        
+        return [
+            Attestation(
+                slot=att[0],
+                block_hash=Hash32(att[1]),
+                validator_index=att[2],
+                signature=att[3],
+            )
+            for att in attestations_data
+        ]
+    
+    def persist_qrpos_justified_checkpoint(
+        self,
+        slot: int,
+        block_hash: Hash32,
+    ) -> None:
+        """
+        Store the latest justified checkpoint.
+        
+        :param slot: Slot number of justified block
+        :param block_hash: Hash of justified block
+        """
+        import rlp
+        from rlp.sedes import big_endian_int, binary
+        
+        key = SchemaV1.make_qrpos_justified_checkpoint_key()
+        encoded = rlp.encode([slot, block_hash], rlp.sedes.List([big_endian_int, binary]))
+        self.db[key] = encoded
+    
+    def get_qrpos_justified_checkpoint(self) -> Tuple[int, Hash32]:
+        """
+        Retrieve the latest justified checkpoint.
+        
+        :return: Tuple of (slot, block_hash)
+        :raises KeyError: If no justified checkpoint exists
+        """
+        import rlp
+        from rlp.sedes import big_endian_int, binary
+        
+        key = SchemaV1.make_qrpos_justified_checkpoint_key()
+        if key not in self.db:
+            return (0, Hash32(b'\x00' * 32))
+        
+        encoded = self.db[key]
+        slot, block_hash = rlp.decode(encoded, rlp.sedes.List([big_endian_int, binary]))
+        return (slot, Hash32(block_hash))
+    
+    def persist_qrpos_finalized_checkpoint(
+        self,
+        slot: int,
+        block_hash: Hash32,
+    ) -> None:
+        """
+        Store the latest finalized checkpoint.
+        
+        :param slot: Slot number of finalized block
+        :param block_hash: Hash of finalized block
+        """
+        import rlp
+        from rlp.sedes import big_endian_int, binary
+        
+        key = SchemaV1.make_qrpos_finalized_checkpoint_key()
+        encoded = rlp.encode([slot, block_hash], rlp.sedes.List([big_endian_int, binary]))
+        self.db[key] = encoded
+    
+    def get_qrpos_finalized_checkpoint(self) -> Tuple[int, Hash32]:
+        """
+        Retrieve the latest finalized checkpoint.
+        
+        :return: Tuple of (slot, block_hash)
+        :raises KeyError: If no finalized checkpoint exists
+        """
+        import rlp
+        from rlp.sedes import big_endian_int, binary
+        
+        key = SchemaV1.make_qrpos_finalized_checkpoint_key()
+        if key not in self.db:
+            return (0, Hash32(b'\x00' * 32))
+        
+        encoded = self.db[key]
+        slot, block_hash = rlp.decode(encoded, rlp.sedes.List([big_endian_int, binary]))
+        return (slot, Hash32(block_hash))
+    
+    def persist_qrpos_block_weight(
+        self,
+        block_hash: Hash32,
+        weight: int,
+    ) -> None:
+        """
+        Store the weight (attestation stake) of a block for fork choice.
+        
+        :param block_hash: Hash of block
+        :param weight: Total stake of attestations
+        """
+        import rlp
+        from rlp.sedes import big_endian_int
+        
+        key = SchemaV1.make_qrpos_block_weight_key(block_hash)
+        self.db[key] = rlp.encode(weight, big_endian_int)
+    
+    def get_qrpos_block_weight(self, block_hash: Hash32) -> int:
+        """
+        Retrieve the weight of a block.
+        
+        :param block_hash: Hash of block
+        :return: Total stake of attestations (0 if not found)
+        """
+        import rlp
+        from rlp.sedes import big_endian_int
+        
+        key = SchemaV1.make_qrpos_block_weight_key(block_hash)
+        if key not in self.db:
+            return 0
+        
+        encoded = self.db[key]
+        weight = rlp.decode(encoded, big_endian_int)
+        return weight
+    
+    def has_qrpos_block_weight(self, block_hash: Hash32) -> bool:
+        """
+        Check if a block has a stored weight (indicates QR-PoS block).
+        
+        :param block_hash: Hash of block to check
+        :return: True if block has weight, False otherwise
+        """
+        key = SchemaV1.make_qrpos_block_weight_key(block_hash)
         return key in self.db
 
     #

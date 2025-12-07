@@ -51,3 +51,25 @@ class SchemaV1(SchemaAPI):
         Key for storing QR-PoS Dilithium signatures indexed by block hash.
         """
         return f"qrpos-signature:{block_hash!r}".encode()
+    
+    @staticmethod
+    def make_qrpos_attestations_lookup_key(block_hash: Hash32) -> bytes:
+        """
+        Key for storing QR-PoS attestations indexed by block hash.
+        """
+        return f"qrpos-attestations:{block_hash!r}".encode()
+    
+    @staticmethod
+    def make_qrpos_justified_checkpoint_key() -> bytes:
+        """Key for storing the latest justified checkpoint."""
+        return b"qrpos:justified-checkpoint"
+    
+    @staticmethod
+    def make_qrpos_finalized_checkpoint_key() -> bytes:
+        """Key for storing the latest finalized checkpoint."""
+        return b"qrpos:finalized-checkpoint"
+    
+    @staticmethod
+    def make_qrpos_block_weight_key(block_hash: Hash32) -> bytes:
+        """Key for storing the weight (attestation stake) of a block."""
+        return b"qrpos-block-weight:" + block_hash
