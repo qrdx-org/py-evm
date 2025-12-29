@@ -179,11 +179,20 @@ class HeaderDB(HeaderDatabaseAPI):
 
     @staticmethod
     def _get_score(db: DatabaseAPI, block_hash: Hash32) -> int:
-        try:
-            encoded_score = db[SchemaV1.make_block_hash_to_score_lookup_key(block_hash)]
-        except KeyError:
-            raise HeaderNotFound(f"No header with hash {encode_hex(block_hash)} found")
-        return rlp.decode(encoded_score, sedes=rlp.sedes.big_endian_int)
+        import time
+        # Retry logic to handle race condition where block is imported but score not yet written
+        max_attempts = 5
+        for attempt in range(max_attempts):
+            try:
+                encoded_score = db[SchemaV1.make_block_hash_to_score_lookup_key(block_hash)]
+                return rlp.decode(encoded_score, sedes=rlp.sedes.big_endian_int)
+            except KeyError:
+                if attempt < max_attempts - 1:
+                    # Wait with exponential backoff: 10ms, 20ms, 40ms, 80ms
+                    time.sleep(0.01 * (2 ** attempt))
+                    continue
+                else:
+                    raise HeaderNotFound(f"No header with hash {encode_hex(block_hash)} found")
 
     def header_exists(self, block_hash: Hash32) -> bool:
         return self._header_exists(self.db, block_hash)
