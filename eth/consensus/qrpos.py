@@ -828,15 +828,19 @@ class QRPoSConsensus:
         return compute_current_slot(self.genesis_time)
     
     def get_proposer_for_slot(self, slot: int) -> int:
-        """Get validator index that should propose for this slot."""
+        """Get validator index that should propose for this slot using stake-weighted selection."""
         epoch = compute_epoch_at_slot(slot)
         active_validators = self.validator_set.get_active_validators(epoch)
         
         if not active_validators:
             raise ValueError("No active validators")
         
-        # Simple round-robin for now (can be made weighted later)
-        return slot % len(active_validators)
+        # Use stake-weighted selection for fairness and security
+        return ProposerSelection.compute_proposer_index(
+            slot,
+            active_validators,
+            seed=b"qrdx-chain"  # Chain-specific seed
+        )
     
     def add_attestation(self, attestation: Attestation) -> None:
         """Add an attestation to the pool."""
